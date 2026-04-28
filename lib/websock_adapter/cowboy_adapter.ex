@@ -15,23 +15,25 @@ if Code.ensure_loaded?(:cowboy_websocket) do
         :erlang.process_flag(key, value)
       end
 
+      hibernate? = Application.get_env(:websock_adapter, :hibernate, false)
+
       handler.init(state)
-      |> handle_reply(handler)
+      |> handle_reply(handler, hibernate?)
     end
 
     @impl true
-    def websocket_handle({opcode, payload}, {handler, state}) when opcode in [:text, :binary] do
+    def websocket_handle({opcode, payload}, {handler, hibernate?, state}) when opcode in [:text, :binary] do
       handler.handle_in({payload, opcode: opcode}, state)
-      |> handle_reply(handler)
+      |> handle_reply(handler, hibernate?)
     end
 
-    def websocket_handle({opcode, payload}, {handler, state}) when opcode in [:ping, :pong] do
+    def websocket_handle({opcode, payload}, {handler, hibernate?, state}) when opcode in [:ping, :pong] do
       if function_exported?(handler, :handle_control, 2) do
         handler.handle_control({payload, opcode: opcode}, state)
       else
         {:ok, state}
       end
-      |> handle_reply(handler)
+      |> handle_reply(handler, hibernate?)
     end
 
     def websocket_handle(opcode, handler_state) when opcode in [:ping, :pong] do
@@ -43,32 +45,32 @@ if Code.ensure_loaded?(:cowboy_websocket) do
     end
 
     @impl true
-    def websocket_info(message, {handler, state}) do
+    def websocket_info(message, {handler, hibernate?, state}) do
       handler.handle_info(message, state)
-      |> handle_reply(handler)
+      |> handle_reply(handler, hibernate?)
     end
 
     @impl true
-    def terminate({:remote, code, _}, _req, {handler, state})
+    def terminate({:remote, code, _}, _req, {handler, _hibernate?, state})
         when code in 1000..1003 or code in 1005..1011 or code == 1015 do
       if function_exported?(handler, :terminate, 2) do
         handler.terminate(:remote, state)
       end
     end
 
-    def terminate({:remote, :closed}, _req, {handler, state}) do
+    def terminate({:remote, :closed}, _req, {handler, _hibernate?, state}) do
       if function_exported?(handler, :terminate, 2) do
         handler.terminate(:closed, state)
       end
     end
 
-    def terminate(:stop, _req, {handler, state}) do
+    def terminate(:stop, _req, {handler, _hibernate?, state}) do
       if function_exported?(handler, :terminate, 2) do
         handler.terminate(:normal, state)
       end
     end
 
-    def terminate(reason, _req, {handler, state}) do
+    def terminate(reason, _req, {handler, _hibernate?, state}) do
       if function_exported?(handler, :terminate, 2) do
         handler.terminate(reason, state)
       end
@@ -80,22 +82,29 @@ if Code.ensure_loaded?(:cowboy_websocket) do
     # Cowboy do its usual logging
     def terminate(_reason, _req, {_handler, _process_flags, _state}), do: :ok
 
-    defp handle_reply({:ok, state}, handler), do: {:ok, {handler, state}}
-    defp handle_reply({:push, data, state}, handler), do: {:reply, data, {handler, state}}
+    defp handle_reply({:ok, state}, handler, hibernate?),
+      do: maybe_hibernate({:ok, {handler, hibernate?, state}}, hibernate?)
 
-    defp handle_reply({:reply, _status, data, state}, handler),
-      do: {:reply, data, {handler, state}}
+    defp handle_reply({:push, data, state}, handler, hibernate?),
+      do: maybe_hibernate({:reply, data, {handler, hibernate?, state}}, hibernate?)
 
-    defp handle_reply({:stop, {:shutdown, :restart}, state}, handler),
-      do: {:reply, {:close, _restart_code = 1012, <<>>}, {handler, state}}
+    defp handle_reply({:reply, _status, data, state}, handler, hibernate?),
+      do: maybe_hibernate({:reply, data, {handler, hibernate?, state}}, hibernate?)
 
-    defp handle_reply({:stop, _reason, state}, handler), do: {:stop, {handler, state}}
+    defp handle_reply({:stop, {:shutdown, :restart}, state}, handler, hibernate?),
+      do: {:reply, {:close, _restart_code = 1012, <<>>}, {handler, hibernate?, state}}
 
-    defp handle_reply({:stop, _reason, close_detail, state}, handler),
-      do: {:reply, close_frame_for_detail(close_detail), {handler, state}}
+    defp handle_reply({:stop, _reason, state}, handler, hibernate?),
+      do: {:stop, {handler, hibernate?, state}}
 
-    defp handle_reply({:stop, _reason, close_detail, messages, state}, handler),
-      do: {:reply, messages ++ [close_frame_for_detail(close_detail)], {handler, state}}
+    defp handle_reply({:stop, _reason, close_detail, state}, handler, hibernate?),
+      do: {:reply, close_frame_for_detail(close_detail), {handler, hibernate?, state}}
+
+    defp handle_reply({:stop, _reason, close_detail, messages, state}, handler, hibernate?),
+      do: {:reply, messages ++ [close_frame_for_detail(close_detail)], {handler, hibernate?, state}}
+
+    defp maybe_hibernate(tuple, true), do: Tuple.append(tuple, :hibernate)
+    defp maybe_hibernate(tuple, false), do: tuple
 
     defp close_frame_for_detail(code) when is_integer(code),
       do: {:close, code, <<>>}
